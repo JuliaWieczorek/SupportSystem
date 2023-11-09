@@ -1,0 +1,3 @@
+.idea/
+emo2vec/
+!emo2vec/main.py
