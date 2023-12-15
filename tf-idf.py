@@ -1,13 +1,23 @@
 import os
+import itertools
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.model_selection import train_test_split
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.ensemble import GradientBoostingClassifier
+
+from sklearn.metrics import accuracy_score, confusion_matrix
 import json
 import pandas as pd
 import numpy as np
 from nltk.tokenize import word_tokenize
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
+
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # Define constants
 EMOTION_MAPPING = {
@@ -102,97 +112,130 @@ def focus_past_count(dialog):
     past_words = past_verbs + past_expressions
     return sum(dialog.count(word) for word in past_words)
 
-def load_nrc_lexicon(folder_path):
+def load_nrc_lexicon(folder_path, emotions_to_load):
     lexicon = {}
-    for filename in os.listdir(folder_path):
-        emotion = os.path.splitext(filename)[0]
+    for emotion in emotions_to_load:
+        filename = emotion + "-NRC-Emotion-Lexicon.txt"
         with open(os.path.join(folder_path, filename), 'r') as file:
-            words = [line.strip() for line in file.readlines()]
+            words_and_values = [line.strip().split('\t') for line in file]
+            words = {word: int(value) for word, value in words_and_values}
             lexicon[emotion] = words
     return lexicon
 
 def nrc_emotions_count(dialog, nrc_lexicon):
-    emotion_counts = {emotion: 0 for emotion in nrc_lexicon.keys()}
-    for word in dialog:
-        for emotion, emotion_words in nrc_lexicon.items():
-            if word in emotion_words:
-                emotion_counts[emotion] += 1
+    emotion_counts = []
+    for emotion, emotion_words in nrc_lexicon.items():
+        emotion_count = sum(word in emotion_words for word in dialog)
+        emotion_counts.append(emotion_count)
     return emotion_counts
+
 
 def main():
     # Load data
     dataset = load_data("ESConv.json")
-    print('dataset')
 
     # Extract and map emotion to numbers
     extracted_data = extract_data(dataset)
     mapped_data = map_emotion_to_numbers(extracted_data)
-    print('mapped data')
 
     # Create DataFrame and filter out excluded emotions
     mapped_data_df = pd.DataFrame(mapped_data)
     balanced_data = mapped_data_df[~mapped_data_df['Emotion Type'].isin(EXCLUDED_EMOTIONS)]
-    print('balanced data')
 
     # Train-test split
     splitted_dialogues = train_test_split_dialogues(balanced_data)
-    print('train-test')
 
     # Tokenize dialogues
     tokenized_dialogues = tokenize_dialogues(splitted_dialogues)
-    print('tokenize')
 
     # Load NRC Lexicon
-    nrc_lexicon = load_nrc_lexicon(NRC_LEXICON_FOLDER)
-    print('load NRC lexicon')
+    # Load only "sadness" and "negative" lexicons
+    nrc_lexicon = load_nrc_lexicon(NRC_LEXICON_FOLDER, ["sadness", "negative"])
 
     # Features for train
     X_train_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']]
-    print('X_train_self_reference')
     X_train_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']]
-    print('X_train_focus_past')
-    X_train_nrc_emotions = [nrc_emotions_count(dialog['Seeker Dialog'], nrc_lexicon) for dialog in tokenized_dialogues['train']]
-    print('X_train_nrc_emotions')
+    X_train_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
+                            dialog in tokenized_dialogues['train']]
+    # Separate counts for "sadness" and "negative"
+    X_train_sadness = [emotion_counts[0] for emotion_counts in X_train_nrc_emotions]
+    X_train_negative = [emotion_counts[1] for emotion_counts in X_train_nrc_emotions]
 
     # Features for test
     X_test_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
-    print('X_test_self_reference')
     X_test_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
-    print('X_test_focus_past')
-    X_test_nrc_emotions = [nrc_emotions_count(dialog['Seeker Dialog'], nrc_lexicon) for dialog in tokenized_dialogues['test']]
-    print('X_test_nrc_emotions')
+    X_test_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
+                            dialog in tokenized_dialogues['test']]
+    # Separate counts for "sadness" and "negative"
+    X_test_sadness = [emotion_counts[0] for emotion_counts in X_test_nrc_emotions]
+    X_test_negative = [emotion_counts[1] for emotion_counts in X_test_nrc_emotions]
 
     # Features arrays
-    X_train_features = np.array([X_train_self_reference, X_train_focus_past, X_train_nrc_emotions]).T
-    X_test_features = np.array([X_test_self_reference, X_test_focus_past, X_test_nrc_emotions]).T
-    print('features')
-
-    # Combine features with NRC Lexicon features
-    for emotion in nrc_lexicon.keys():
-        X_train_nrc_emotion = [dialog[emotion] for dialog in X_train_nrc_emotions]
-        X_test_nrc_emotion = [dialog[emotion] for dialog in X_test_nrc_emotions]
-        X_train_features = np.column_stack((X_train_features, X_train_nrc_emotion))
-        X_test_features = np.column_stack((X_test_features, X_test_nrc_emotion))
+    X_train_features = np.array([X_train_self_reference, X_train_focus_past, X_train_sadness, X_train_negative]).T
+    X_test_features = np.array([X_test_self_reference, X_test_focus_past, X_test_sadness, X_test_negative]).T
 
     # Model TF-IDF
     vectorizer = TfidfVectorizer()
     X_train_tfidf = vectorizer.fit_transform([" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']])
     X_test_tfidf = vectorizer.transform([" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']])
-    print('mode tf-idf')
 
     # Combine features with TF-IDF
     X_train_combined = np.hstack((X_train_tfidf.toarray(), X_train_features))
     X_test_combined = np.hstack((X_test_tfidf.toarray(), X_test_features))
-    print('combined')
 
     # Classification model - RandomForestClassifier
     model = RandomForestClassifier()
     model.fit(X_train_combined, [dialog['Emotion Type'] for dialog in tokenized_dialogues['train']])
-    print('classification model')
 
     y_pred = model.predict(X_test_combined)
     accuracy = accuracy_score([dialog['Emotion Type'] for dialog in tokenized_dialogues['test']], y_pred)
-    print(f"Accuracy: {accuracy}")
+    print(f'Accuracy: {accuracy * 100:.2f}%')
+    #
+    # Create DataFrame with features and true/predicted labels
+    df_results = pd.DataFrame({
+         'Self Reference': X_test_self_reference,
+         'Focus Past': X_test_focus_past,
+         'Sadness': X_test_sadness,
+         'Negative': X_test_negative,
+         'True Label': [dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
+         'Predicted Label': y_pred
+    })
+
+    # Map emotion labels to their corresponding names
+    emotion_labels = {0: 'anxiety', 1: 'depression', 2: 'sadness', 3: 'anger', 4: 'fear', 5: 'shame', 6: 'disgust',
+                      7: 'nervousness', 8: 'pain', 9: 'guilt', 10: 'jealousy'}
+    df_results['True Label'] = df_results['True Label'].map(emotion_labels)
+    df_results['Predicted Label'] = df_results['Predicted Label'].map(emotion_labels)
+
+    # Print the DataFrame
+    print(df_results)
+
+    classifiers = {
+        'Random Forest': RandomForestClassifier(),
+        'Logistic Regression': LogisticRegression(),
+        'Support Vector Machine': SVC(),
+        'K-Nearest Neighbors': KNeighborsClassifier(),
+        'Naive Bayes': MultinomialNB(),
+        'Gradient Boosting': GradientBoostingClassifier()
+    }
+
+    comparison_df = pd.DataFrame(columns=['Classifier', 'Accuracy'])
+
+    for classifier_name, classifier in classifiers.items():
+        classifier.fit(X_train_combined, [dialog['Emotion Type'] for dialog in tokenized_dialogues['train']])
+
+        y_pred_classifier = classifier.predict(X_test_combined)
+        accuracy_classifier = accuracy_score([dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
+                                             y_pred_classifier)
+
+        comparison_df = comparison_df.append({'Classifier': classifier_name, 'Accuracy': accuracy_classifier},
+                                             ignore_index=True)
+
+        print(f"Results for {classifier_name}:")
+        print(f'Accuracy ({classifier_name}): {accuracy_classifier * 100:.2f}%\n')
+
+    print("Comparison of Classifiers:")
+    print(comparison_df)
 
 if __name__ == "__main__":
     main()
