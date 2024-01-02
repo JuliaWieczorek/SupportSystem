@@ -1,3 +1,4 @@
 .idea/
 emo2vec/
 !RandomForestClassificationOfEmotionAcc0.28.py
+.env/

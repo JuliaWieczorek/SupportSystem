@@ -11,7 +11,7 @@ from collections import Counter
 
 
 # File path to the JSON dataset
-file_path = "../emo2vec/ESConv.json"
+file_path = "ESConv.json"
 
 def load_data(file_path):
     with open(file_path, "r", encoding='utf-8') as file:
@@ -36,7 +36,6 @@ dataset = load_data(file_path)
 
 # Extract data
 extracted_data = extract_data(dataset)
-
 
 def map_emotion_to_numbers(data):
     # Define emotion type to number mapping

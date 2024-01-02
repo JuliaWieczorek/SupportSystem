@@ -9,7 +9,6 @@ from sklearn.svm import SVC
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.ensemble import GradientBoostingClassifier
-
 from sklearn.metrics import accuracy_score, confusion_matrix
 import json
 import pandas as pd
@@ -129,6 +128,49 @@ def nrc_emotions_count(dialog, nrc_lexicon):
         emotion_counts.append(emotion_count)
     return emotion_counts
 
+def divide_and_analyze_conversation(dialog_tokens, num_parts=3):
+    """
+    Divide the conversation into multiple parts and analyze how the number of features (TF-IDF) changes.
+
+    :param dialog_tokens: List of tokenized dialog.
+    :param num_parts: Number of parts to divide the conversation.
+    :return: List of number of features (TF-IDF) for each part.
+    """
+    # Calculate the length of each part
+    part_length = len(dialog_tokens) // num_parts
+
+    # List to store the number of features (TF-IDF) for each part
+    features_per_part = []
+
+    # Iterate over each part and calculate the number of features (TF-IDF)
+    for i in range(num_parts):
+        start_idx = i * part_length
+        end_idx = (i + 1) * part_length if i != num_parts - 1 else len(dialog_tokens)
+
+        part_dialog_tokens = dialog_tokens[start_idx:end_idx]
+        part_dialog_text = " ".join(part_dialog_tokens)
+
+        # Vectorize the part of the conversation
+        vectorizer_part = TfidfVectorizer()
+        X_part_tfidf = vectorizer_part.fit_transform([part_dialog_text])
+
+        # Store the number of features (TF-IDF) for the part
+        features_per_part.append(X_part_tfidf.shape[1])
+
+    return features_per_part
+
+def save_confusion_matrix_to_file(cm, classifier_name, emotion_labels):
+    if not os.path.exists('confusion_matrix'):
+        os.makedirs('confusion_matrix')
+
+    plt.figure(figsize=(10, 7))
+    sns.heatmap(cm, annot=True, fmt='g', cmap='Blues', xticklabels=emotion_labels.values(),
+                yticklabels=emotion_labels.values())
+    plt.title(f"Confusion Matrix for {classifier_name}")
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.savefig(f'confusion_matrix/{classifier_name}_confusion_matrix.png')
+    plt.close()
 
 def main():
     # Load data
@@ -149,30 +191,45 @@ def main():
     tokenized_dialogues = tokenize_dialogues(splitted_dialogues)
 
     # Load NRC Lexicon
-    # Load only "sadness" and "negative" lexicons
-    nrc_lexicon = load_nrc_lexicon(NRC_LEXICON_FOLDER, ["sadness", "negative"])
+    # Load emotion lexicons which can be found in our dataframe
+    nrc_lexicon = load_nrc_lexicon(NRC_LEXICON_FOLDER, ["disgust", "fear", "sadness", "negative"])
+    # TODO: in NRC lexicon lack of anxiety, depression, anger and shame emotion (which can be found in dataframe)
 
     # Features for train
     X_train_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']]
     X_train_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']]
     X_train_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
                             dialog in tokenized_dialogues['train']]
-    # Separate counts for "sadness" and "negative"
-    X_train_sadness = [emotion_counts[0] for emotion_counts in X_train_nrc_emotions]
-    X_train_negative = [emotion_counts[1] for emotion_counts in X_train_nrc_emotions]
+    # Separate counts for emotions
+    X_train_disgust = [emotion_counts[0] for emotion_counts in X_train_nrc_emotions]
+    X_train_fear = [emotion_counts[1] for emotion_counts in X_train_nrc_emotions]
+    X_train_sadness = [emotion_counts[2] for emotion_counts in X_train_nrc_emotions]
+    X_train_negative = [emotion_counts[3] for emotion_counts in X_train_nrc_emotions]
+
 
     # Features for test
     X_test_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
     X_test_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
     X_test_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
                             dialog in tokenized_dialogues['test']]
-    # Separate counts for "sadness" and "negative"
+    # Separate counts for emotions
+    X_test_disgust = [emotion_counts[0] for emotion_counts in X_test_nrc_emotions]
+    X_test_fear = [emotion_counts[1] for emotion_counts in X_test_nrc_emotions]
     X_test_sadness = [emotion_counts[0] for emotion_counts in X_test_nrc_emotions]
     X_test_negative = [emotion_counts[1] for emotion_counts in X_test_nrc_emotions]
 
     # Features arrays
-    X_train_features = np.array([X_train_self_reference, X_train_focus_past, X_train_sadness, X_train_negative]).T
-    X_test_features = np.array([X_test_self_reference, X_test_focus_past, X_test_sadness, X_test_negative]).T
+    X_train_features = np.array([X_train_self_reference, X_train_focus_past, X_train_fear, X_train_disgust ,X_train_sadness, X_train_negative]).T
+    X_test_features = np.array([X_test_self_reference, X_test_focus_past, X_test_fear, X_test_disgust, X_test_sadness, X_test_negative]).T
+
+    tokenized_dialogues = tokenize_dialogues(splitted_dialogues)
+    features_per_part = divide_and_analyze_conversation(
+        [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['train']], num_parts=3)
+    print("Number of features (TF-IDF) per part for training dialogues:", features_per_part)
+
+    features_per_part = divide_and_analyze_conversation(
+        [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['test']], num_parts=3)
+    print("Number of features (TF-IDF) per part for testing dialogues:", features_per_part)
 
     # Model TF-IDF
     vectorizer = TfidfVectorizer()
@@ -207,8 +264,10 @@ def main():
     df_results['True Label'] = df_results['True Label'].map(emotion_labels)
     df_results['Predicted Label'] = df_results['Predicted Label'].map(emotion_labels)
 
-    # Print the DataFrame
     print(df_results)
+
+    features_per_part = divide_and_analyze_conversation(tokenized_dialogues, num_parts=3)
+    print("Number of features (TF-IDF) per part:", features_per_part)
 
     classifiers = {
         'Random Forest': RandomForestClassifier(),
@@ -228,11 +287,15 @@ def main():
         accuracy_classifier = accuracy_score([dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
                                              y_pred_classifier)
 
-        comparison_df = comparison_df.append({'Classifier': classifier_name, 'Accuracy': accuracy_classifier},
-                                             ignore_index=True)
+        temp_df = pd.DataFrame({'Classifier': [classifier_name], 'Accuracy': [accuracy_classifier]})
+        comparison_df = pd.concat([comparison_df, temp_df], ignore_index=True)
 
         print(f"Results for {classifier_name}:")
         print(f'Accuracy ({classifier_name}): {accuracy_classifier * 100:.2f}%\n')
+
+        cm = confusion_matrix([dialog['Emotion Type'] for dialog in tokenized_dialogues['test']], y_pred_classifier)
+
+        save_confusion_matrix_to_file(cm, classifier_name, emotion_labels)
 
     print("Comparison of Classifiers:")
     print(comparison_df)
