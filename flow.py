@@ -15,8 +15,13 @@ import pandas as pd
 import numpy as np
 from nltk.tokenize import word_tokenize
 
+import spacy
+from spacy.matcher import Matcher
+
 import seaborn as sns
 import matplotlib.pyplot as plt
+
+nlp = spacy.load("en_core_web_sm")
 
 # Define constants
 EMOTION_MAPPING = {
@@ -100,16 +105,28 @@ def tokenize_dialogues(dialogues):
 def self_reference_count(dialog):
     return dialog.count('i')
 
+#def focus_past_count(dialog):
+#    past_verbs = ['was', 'were', 'had', 'did', 'went', 'said', 'made', 'came', 'took', 'saw', 'knew', 'got', 'thought', 'found', 'told', 'asked',
+#                  'worked', 'called', 'tried', 'used', 'wrote', 'read', 'played', 'bought', 'ate', 'drank', 'listened',
+#                  'watched', 'left', 'met', 'began', 'finished', 'learned', 'helped', 'gave', 'visited', 'lived',
+#                  'studied', 'loved', 'hated', 'missed', 'spoke', 'believed', 'forgot', 'remembered', 'opened',
+#                  'closed', 'sang', 'danced']
+#    past_expressions = ['yesterday', 'last week', 'ago', 'when I was a child', 'in the past',
+#                        'a long time ago', 'back then', 'in the old days', 'in my youth']
+#    past_words = past_verbs + past_expressions
+#    return sum(dialog.count(word) for word in past_words)
+
 def focus_past_count(dialog):
-    past_verbs = ['was', 'were', 'had', 'did', 'went', 'said', 'made', 'came', 'took', 'saw', 'knew', 'got', 'thought', 'found', 'told', 'asked',
-                  'worked', 'called', 'tried', 'used', 'wrote', 'read', 'played', 'bought', 'ate', 'drank', 'listened',
-                  'watched', 'left', 'met', 'began', 'finished', 'learned', 'helped', 'gave', 'visited', 'lived',
-                  'studied', 'loved', 'hated', 'missed', 'spoke', 'believed', 'forgot', 'remembered', 'opened',
-                  'closed', 'sang', 'danced']
-    past_expressions = ['yesterday', 'last week', 'ago', 'when I was a child', 'in the past',
-                        'a long time ago', 'back then', 'in the old days', 'in my youth']
-    past_words = past_verbs + past_expressions
-    return sum(dialog.count(word) for word in past_words)
+    past_words = set()
+    past_expressions = set()
+
+    for i in dialog:
+        for token in nlp(i):
+            if token.tag_ in ["VBD", "VBN"]:  # VBD - Past tense, VBN - Past participle
+                past_words.add(token.text.lower())
+            if token.text.lower() in ["yesterday", "ago", "last", "past"]:
+                past_expressions.add(token.text.lower())
+    return len(past_words) + len(past_expressions)
 
 def load_nrc_lexicon(folder_path, emotions_to_load):
     lexicon = {}
@@ -128,36 +145,50 @@ def nrc_emotions_count(dialog, nrc_lexicon):
         emotion_counts.append(emotion_count)
     return emotion_counts
 
+
+def features(tokenized_dialogues, nrc_lexicon, dataset):
+    '''dataset -> 'train'/'test'''''
+    # Features for train
+    X_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues[dataset]]
+    X_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues[dataset]]
+    X_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
+                            dialog in tokenized_dialogues[dataset]]
+    # Separate counts for emotions
+    X_disgust = [emotion_counts[0] for emotion_counts in X_train_nrc_emotions]
+    X_fear = [emotion_counts[1] for emotion_counts in X_train_nrc_emotions]
+    X_sadness = [emotion_counts[2] for emotion_counts in X_train_nrc_emotions]
+    X_negative = [emotion_counts[3] for emotion_counts in X_train_nrc_emotions]
+
+    # Features arrays
+    X_features = np.array(
+        [X_self_reference, X_focus_past, X_fear, X_disgust, X_sadness, X_negative]).T
+
+    # Model TF-IDF
+    vectorizer = TfidfVectorizer()
+    X_tfidf = vectorizer.fit_transform(
+        [" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues[dataset]])
+    X_test_tfidf = vectorizer.transform([" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues[dataset]])
+
+    # Combine features with TF-IDF
+    X_combined = np.hstack((X_train_tfidf.toarray(), X_features))
+    return X_combined
+
 def divide_and_analyze_conversation(dialog_tokens, num_parts=3):
     """
-    Divide the conversation into multiple parts and analyze how the number of features (TF-IDF) changes.
+    Divide the conversation into multiple parts and analyze how the number of features changes.
 
     :param dialog_tokens: List of tokenized dialog.
     :param num_parts: Number of parts to divide the conversation.
-    :return: List of number of features (TF-IDF) for each part.
+    :return: List of number of features for each part.
     """
-    # Calculate the length of each part
     part_length = len(dialog_tokens) // num_parts
-
-    # List to store the number of features (TF-IDF) for each part
     features_per_part = []
 
-    # Iterate over each part and calculate the number of features (TF-IDF)
     for i in range(num_parts):
         start_idx = i * part_length
         end_idx = (i + 1) * part_length if i != num_parts - 1 else len(dialog_tokens)
-
         part_dialog_tokens = dialog_tokens[start_idx:end_idx]
-        part_dialog_text = " ".join(part_dialog_tokens)
 
-        # Vectorize the part of the conversation
-        vectorizer_part = TfidfVectorizer()
-        X_part_tfidf = vectorizer_part.fit_transform([part_dialog_text])
-
-        # Store the number of features (TF-IDF) for the part
-        features_per_part.append(X_part_tfidf.shape[1])
-
-    return features_per_part
 
 def save_confusion_matrix_to_file(cm, classifier_name, emotion_labels):
     if not os.path.exists('confusion_matrix'):
@@ -172,7 +203,54 @@ def save_confusion_matrix_to_file(cm, classifier_name, emotion_labels):
     plt.savefig(f'confusion_matrix/{classifier_name}_confusion_matrix.png')
     plt.close()
 
-def main():
+def save_results_to_disk(df_results, classifier_name):
+    current_time = pd.Timestamp.now().strftime("%Y-%m-%d_%H-%M")
+    file_name = f"results_{classifier_name}_{current_time}.csv"
+    if not os.path.exists(f"results/{current_time}"):
+        os.makedirs(f"results/{current_time}")
+    file_name = f"results/{current_time}/" + file_name
+    df_results.to_csv(file_name, index=False)
+
+def emotion_classifier_workflow():
+    """
+    Description:
+
+    The function emotion_classifier_workflow orchestrates a complete workflow for emotion classification based on dialogues. This function automates the process from data loading to model evaluation, offering a structured approach for emotion analysis. It supports multiple classifiers and provides insights into the emotional content of dialogues.
+
+    Parameters:
+
+    None
+
+    Returns:
+
+    comparison_df: A DataFrame containing the comparison of classifiers with their respective accuracies.
+    Saved confusion matrices and results for each classifier to disk.
+
+    Workflow Steps:
+
+    Data Loading: Load the dataset from the file "ESConv.json".
+    Data Preprocessing:
+        Extract relevant data from the dataset.
+        Map emotions to numerical values.
+        Create a DataFrame and filter out excluded emotions.
+    Data Splitting: Split the dataset into training and testing sets.
+    Tokenization: Tokenize the dialogues in the training and testing sets.
+    Feature Extraction: Extract features related to self-reference, focus on the past, and emotions using the NRC Lexicon.
+    TF-IDF Vectorization: Convert the tokenized dialogues into TF-IDF vectors.
+    Model Training and Evaluation:
+        Train a Random Forest Classifier using the combined features.
+        Evaluate the model's accuracy on the testing set.
+    Classifier Comparison:
+        Train and evaluate multiple classifiers including Logistic Regression, Support Vector Machine, K-Nearest Neighbors, Naive Bayes, and Gradient Boosting.
+        Generate a DataFrame with a comparison of classifiers and their accuracies.
+    Results Storage:
+        Save the confusion matrices and results of each classifier to disk for further analysis
+
+    Usage Example:
+    comparison_results = emotion_classifier_workflow()
+    print(comparison_results)
+
+    """
     # Load data
     dataset = load_data("ESConv.json")
 
@@ -206,12 +284,11 @@ def main():
     X_train_sadness = [emotion_counts[2] for emotion_counts in X_train_nrc_emotions]
     X_train_negative = [emotion_counts[3] for emotion_counts in X_train_nrc_emotions]
 
-
     # Features for test
     X_test_self_reference = [self_reference_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
     X_test_focus_past = [focus_past_count(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']]
     X_test_nrc_emotions = [nrc_emotions_count([word.lower() for word in dialog['Seeker Dialog']], nrc_lexicon) for
-                            dialog in tokenized_dialogues['test']]
+                           dialog in tokenized_dialogues['test']]
     # Separate counts for emotions
     X_test_disgust = [emotion_counts[0] for emotion_counts in X_test_nrc_emotions]
     X_test_fear = [emotion_counts[1] for emotion_counts in X_test_nrc_emotions]
@@ -219,21 +296,26 @@ def main():
     X_test_negative = [emotion_counts[1] for emotion_counts in X_test_nrc_emotions]
 
     # Features arrays
-    X_train_features = np.array([X_train_self_reference, X_train_focus_past, X_train_fear, X_train_disgust ,X_train_sadness, X_train_negative]).T
-    X_test_features = np.array([X_test_self_reference, X_test_focus_past, X_test_fear, X_test_disgust, X_test_sadness, X_test_negative]).T
+    X_train_features = np.array(
+        [X_train_self_reference, X_train_focus_past, X_train_fear, X_train_disgust, X_train_sadness,
+         X_train_negative]).T
+    X_test_features = np.array(
+        [X_test_self_reference, X_test_focus_past, X_test_fear, X_test_disgust, X_test_sadness, X_test_negative]).T
 
     tokenized_dialogues = tokenize_dialogues(splitted_dialogues)
-    features_per_part = divide_and_analyze_conversation(
-        [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['train']], num_parts=3)
-    print("Number of features (TF-IDF) per part for training dialogues:", features_per_part)
 
-    features_per_part = divide_and_analyze_conversation(
-        [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['test']], num_parts=3)
-    print("Number of features (TF-IDF) per part for testing dialogues:", features_per_part)
+    # features_per_part_train = divide_and_analyze_conversation(
+    #    [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['train']], num_parts=3)
+    # print("Number of features (TF-IDF) per part for training dialogues:", features_per_part_train)
+
+    # features_per_part_test = divide_and_analyze_conversation(
+    #    [dialog['Seeker Dialog'] for dialog in tokenized_dialogues['test']], num_parts=3)
+    # print("Number of features (TF-IDF) per part for testing dialogues:", features_per_part_test)
 
     # Model TF-IDF
     vectorizer = TfidfVectorizer()
-    X_train_tfidf = vectorizer.fit_transform([" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']])
+    X_train_tfidf = vectorizer.fit_transform(
+        [" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['train']])
     X_test_tfidf = vectorizer.transform([" ".join(dialog['Seeker Dialog']) for dialog in tokenized_dialogues['test']])
 
     # Combine features with TF-IDF
@@ -250,24 +332,27 @@ def main():
     #
     # Create DataFrame with features and true/predicted labels
     df_results = pd.DataFrame({
-         'Self Reference': X_test_self_reference,
-         'Focus Past': X_test_focus_past,
-         'Sadness': X_test_sadness,
-         'Negative': X_test_negative,
-         'True Label': [dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
-         'Predicted Label': y_pred
+        'Self Reference': X_test_self_reference,
+        'Focus Past': X_test_focus_past,
+        'Fear': X_train_fear,
+        'Disgust': X_train_disgust,
+        'Sadness': X_test_sadness,
+        'Negative': X_test_negative,
+        'True Label': [dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
+        'Predicted Label': y_pred
     })
 
     # Map emotion labels to their corresponding names
     emotion_labels = {0: 'anxiety', 1: 'depression', 2: 'sadness', 3: 'anger', 4: 'fear', 5: 'shame', 6: 'disgust',
                       7: 'nervousness', 8: 'pain', 9: 'guilt', 10: 'jealousy'}
+    # TODO: check if still correct labelling
     df_results['True Label'] = df_results['True Label'].map(emotion_labels)
     df_results['Predicted Label'] = df_results['Predicted Label'].map(emotion_labels)
 
     print(df_results)
 
-    features_per_part = divide_and_analyze_conversation(tokenized_dialogues, num_parts=3)
-    print("Number of features (TF-IDF) per part:", features_per_part)
+    # features_per_part = divide_and_analyze_conversation(tokenized_dialogues, num_parts=3)
+    # print("Number of features (TF-IDF) per part:", features_per_part)
 
     classifiers = {
         'Random Forest': RandomForestClassifier(),
@@ -294,11 +379,24 @@ def main():
         print(f'Accuracy ({classifier_name}): {accuracy_classifier * 100:.2f}%\n')
 
         cm = confusion_matrix([dialog['Emotion Type'] for dialog in tokenized_dialogues['test']], y_pred_classifier)
-
         save_confusion_matrix_to_file(cm, classifier_name, emotion_labels)
 
+        df_results = pd.DataFrame({
+            'Self Reference': X_test_self_reference,
+            'Focus Past': X_test_focus_past,
+            'Fear': X_test_fear,
+            'Disgust': X_test_disgust,
+            'Sadness': X_test_sadness,
+            'Negative': X_test_negative,
+            'True Label': [dialog['Emotion Type'] for dialog in tokenized_dialogues['test']],
+            'Predicted Label': y_pred_classifier
+        })
+        save_results_to_disk(df_results, classifier_name)
     print("Comparison of Classifiers:")
     print(comparison_df)
+
+def main():
+    emotion_classifier_workflow()
 
 if __name__ == "__main__":
     main()
